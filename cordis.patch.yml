@@ -1,0 +1,26 @@
+# A row's name is an assertion in an update, so replacements disable the
+# original and insert a new row. Package identities remain stable for the
+# browser module graph; there is exactly one active owner per identity.
+- id: workspace-files
+  disabled: true
+- id: ui-sidebar-right
+  disabled: true
+- id: ui-sidebar-files
+  disabled: true
+- id: ui-sidebar-documentpreview
+  disabled: true
+- insert:
+    - id: omh-files-rpc-schemas
+      name: ./plugins/rpc-schemas/index.js
+    - id: omh-files-workspace-files
+      name: ./plugins/dsh-api-workspace-files/lib/index.js
+    - id: omh-files-sidebar-right
+      name: ./plugins/dsh-client-ui-sidebar-right/lib/index.js
+    - id: omh-files-sidebar-files
+      name: ./plugins/dsh-client-ui-sidebar-files/lib/index.js
+    - id: omh-files-documentpreview
+      name: ./plugins/dsh-client-ui-sidebar-documentpreview/lib/index.js
+    - id: omh-files-markdown
+      name: ./plugins/dsh-client-ui-markdown/index.js
+    - id: omh-files-office
+      name: ./plugins/dsh-client-ui-office/index.js

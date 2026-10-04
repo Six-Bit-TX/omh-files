@@ -1,0 +1,49 @@
+{
+  "name": "@omh/files",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Files, guarded editors, and persistent sidebar workspaces for OMH.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": "0.1.6-alpha.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "check:artifacts": "node scripts/check-artifacts.mjs",
+    "test:office": "node --test plugins/dsh-client-ui-office/tests/*.test.js",
+    "test:markdown": "node plugins/dsh-client-ui-markdown/tools/host-check.mjs",
+    "install:profile": "node scripts/install.mjs",
+    "check:bundle": "node scripts/check.mjs",
+    "test:installer": "node --test scripts/install.test.mjs"
+  },
+  "omh": {
+    "runtimeVersion": "0.1.6-alpha.1",
+    "category": "Files and editing",
+    "features": [
+      "OMH-01",
+      "OMH-02",
+      "OMH-03",
+      "OMH-04",
+      "OMH-05",
+      "OMH-06",
+      "OMH-07",
+      "OMH-08",
+      "OMH-09",
+      "OMH-10",
+      "OMH-11",
+      "OMH-12"
+    ],
+    "requires": []
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Six-Bit-TX/omh-files.git"
+  },
+  "homepage": "https://github.com/Six-Bit-TX/omh-files"
+}

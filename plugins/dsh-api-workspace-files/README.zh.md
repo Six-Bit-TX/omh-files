@@ -1,0 +1,193 @@
+---
+description: "面向 Web GUI 的工作区文件服务：通过组合文件系统进行有界文件读取，列举后端可达的目录，在工作区根内重命名、移动与永久删除，按版本前置条件整体替换文本，以上传新建文件，用浏览器下载整体流式传输文件，读取单文件 git 历史，并在 Session 工作区根内观察已埋点的文件系统操作。"
+kind: "package-reference"
+---
+
+# @deepseek-ai/dsh-api-workspace-files
+
+[English](README.md) | 中文
+
+## 概述
+
+使用本包可从 Web Client 预览 Session 文件系统允许读取的文件。它按页读取 UTF-8 文本、按有界窗口或完整文件读取原始字节、从基文件目录解析关联文件，并报告文件元数据。文件读取与目录列举都可以指向文件系统后端可达的任意路径。`rename`、`move` 与 `delete` 是限定于 Session 工作区根的修改操作，`write` 整体替换文件文本、`upload` 按精确字节新建文件——两者都经组合文件系统并受该后端写入策略约束——`history` 报告文件的 git 历史。另有一类读取完全不走 Remote：浏览器下载路由经已认证的 `/api` 通道流式传输整个文件，因此超过 `maxFileBytes` 的文件仍可下载。已埋点的文件系统观察仍限定于工作区。
+
+## 目录
+
+- [使用本包](#use-this-package)
+- [理解实现](#understand-the-implementation)
+- [进一步探索](#further-exploration)
+- [模型体验](#model-experience)
+- [已知限制与延期工作](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
+<a id="use-this-package"></a>
+## 使用本包
+
+把本包与 `dsh-fs`、`dsh-sandbox-policy`、Session store、子进程提供方和 Typert Gateway 一起挂载；bundle 把它紧随 Session Controller 之后挂载。每个方法都在线路上携带 Session 身份，Client 调用 `remote.workspaceFiles.read(sessionId, path, range, signal)`、`stat(sessionId, path, signal)`、`readBytes(sessionId, path, range, signal)`、`list(sessionId, path, signal)`、`rename(sessionId, path, newName, signal)`、`move(sessionId, paths, destination, signal)`、`delete(sessionId, path, signal)`、`write(sessionId, path, text, version, signal)`、`upload(sessionId, path, data, signal)`、`history(sessionId, path, signal)` 或 `changes(sessionId, signal)`，从不自己指定根。Host 读取 live Session header，cold Session 则使用持久层 `stat`；它不会激活 Agent、读取事件正文或借用父 Session 的根。live 读取不要求挂载 Session persistence；未挂载时 cold Session 无法解析，Gateway 返回 `gateway/lookup-not-found`。
+
+| 方法 | 返回 | 用途 |
+|---|---|---|
+| `stat(path)` | `WorkspaceFileStat { absolutePath, version, bytes? }` | 一个普通文件的身份、版本与大小，不含内容 |
+| `read(path, { offset?, limit? })` | `WorkspaceFileText` = stat + `{ offset, text, lines, eof }` | UTF-8 文本文件的一个行窗口；`lines` 计行数，使单个空行与越过文件末尾的页可区分 |
+| `readBytes(path, { offset?, length? })` | `WorkspaceFileBytes` = stat + `{ offset, data, eof }` | 任意普通文件的一个原始字节窗口，base64 编码 |
+| `readAll(path)` | `WorkspaceFileBytes`，其中 `offset: 0`、`eof: true` | `maxFileBytes` 内的完整原始字节；超大文件失败，不截断 |
+| `readRelated(path, relativePath)` | `WorkspaceFileBytes` | Host 从基文件目录解析出的文件的完整字节 |
+| `list(path)` | `WorkspaceDirectoryListing { path, entries, truncated }` | 后端可达的任意目录的直接子项 |
+| `rename(path, newName)` | `WorkspaceFileMutation { absolutePath }` | 在同一工作区目录内把条目改名为 `newName` |
+| `move(paths, destination)` | `WorkspaceFileMoves { destination, entries }` | 把多个条目按各自原名移动到另一个工作区目录 |
+| `delete(path)` | `WorkspaceFileMutation { absolutePath }` | 永久删除一个工作区条目，目录连同其下全部内容 |
+| `write(path, text, version)` | `WorkspaceFileStat` | 整体替换一个普通文件的文本，以调用方读到的版本为前置条件 |
+| `upload(path, data)` | `WorkspaceFileStat` | 按精确字节新建一个文件，绝不替换已有文件 |
+| `history(path)` | `WorkspaceFileHistory { path, entries }` | 一个文件的 git 提交，最新在前；git 无历史时为空 |
+| `changes()` | `WorkspaceFileWatchFrame` 流 | 订阅就绪确认，随后为工作区根内的文件系统观察 |
+
+### 寻址与路径
+
+`read`、`readBytes`、`readAll`、`readRelated`、`stat`、`list`、`rename`、`move`、`delete`、`write`、`upload` 与 `history` 接受绝对路径或相对于所选 Session 工作区根的路径。组合文件系统决定路径是否可读；本服务不额外要求读取、列举或 `history` 限定于工作区。`readRelated` 从基文件所在目录解析相对文件系统路径，基文件或目标文件位于工作区外时同样适用。这些方法以文件系统执行环境中的绝对路径报告文件。`list` 对工作区根内的目录报告工作区路径，对根外的目录报告其绝对路径。`rename`、`move` 与 `delete` 是例外：解析后目录离开工作区根、或目标目录离开工作区根的条目，一律以 `workspace-file/outside-workspace` 拒绝。`write` 与 `upload` 不另设包含规则：组合文件系统的写入策略就是它们的边界，且按该作用域指名的 Session 解析。`changes` 只报告工作区根内已埋点的文件系统观察。
+
+### 修改操作
+
+`rename(path, newName)` 只改条目名称、不移动它：`newName` 必须是单个路径段，非空、两端无空白、不含 `/`、`\` 或 NUL，且不是 `.` 或 `..`；其余情况是 `gateway/bad-request`。其父目录经文件系统解析后必须仍位于工作区根内。返回该条目的新绝对路径。
+
+`move(paths, destination)` 把一个或多个条目移动到另一个工作区目录，各自保留原名。`destination` 是绝对路径或相对于工作区根的路径，且必须解析到已存在的目录——指向文件是 `workspace-file/not-directory`。每个待移动条目的父目录都必须解析到工作区根内，目标目录亦然；把自己移入自身或自身的子树、以及移动工作区根本身，都是 `gateway/bad-request`。**整个请求在第一个条目移动之前就完成校验**，因此被拒绝时所有条目都留在原处：目标名字已被占用、或两个待移动条目会落到同一个名字，都是 `workspace-file/exists` 且什么都不会移动。已经在目标目录里的条目原地不动，并以自身路径出现在结果中——这正是把一行拖回它原来所在目录时是无操作而非报错的原因。返回结果给出目标目录的绝对路径（调用方要重新列举的唯一目录），以及按请求顺序、每个请求路径一条的 `{ from, absolutePath }`。
+
+`delete(path)` 永久删除条目：普通文件、符号链接，或连同其下全部内容的目录。它拒绝工作区根本身（`gateway/bad-request`）与父目录解析后离开工作区根的条目（`workspace-file/outside-workspace`）；路径不存在则是 `workspace-file/not-found`。返回被删条目的绝对路径。`rename`、`move` 与 `delete` 解析并限制父目录，同时保留末端条目本身：符号链接或 Windows junction 会被重命名、移动或解除链接，不会修改其目标，即使目标不存在或位于工作区之外也是如此。
+
+`write(path, text, version)` 整体替换一个已存在的普通文件的文本。`version` 是必需的，即调用方读取该文件时的版本（来自 `stat` 或此前的 `read`）；此后文件若已改变，写入被拒绝而不是覆盖，空的 `version` 是 `gateway/bad-request`。写入经 `ctx.fs` 并使用该 Session 解析出的策略：`read-only` 的 Session 一律以 `workspace-file/denied` 拒绝，`workspace-write` 只接受落在该 Session 工作区根内的目标。文件不存在是 `workspace-file/not-found`，文本超过 `maxFileBytes` 是 `workspace-file/too-large`。返回写入后文件的元数据，其 `version` 就是下一次写入的新基准。字节按原样写入：换行风格的转换由调用方负责，侧栏编辑器因此会还原它读到的风格。
+
+`upload(path, data)` 按精确字节新建一个文件——即文件管理器的上传：读者把自己机器上的文件拖进工作区目录。`data` 是文件完整内容的 base64；它必须是规范填充的 base64，因为只能“勉强解码”的载荷会存成与调用方发出的不同的东西，其他一律是 `gateway/bad-request`。路径的最后一段必须是可用的文件名，且写入永远带 `createIfAbsent`，所以上传绝不替换调用方没有读过的文件：名字已被占用是 `workspace-file/exists`。文本超过 `maxFileBytes` 是 `workspace-file/too-large`，且什么都不会创建。返回新建文件的元数据，与 `write` 一致，读者可以立刻翻页读取。它的策略边界与 `write` 相同：`read-only` 的 Session 一律拒绝上传，`workspace-write` 只接受落在该 Session 工作区根内的目标。
+
+### 浏览器下载
+
+有一类读取不经过 Remote 面。`GET /api/workspace.download?sessionId=<id>&path=<path>` 把单个普通文件以 `application/octet-stream` 流式传给浏览器，并带一个写明文件名的 `Content-Disposition: attachment`，因此下载不受完整文件上限约束：处理函数经 `ctx.fs` 按 `maxBytes` 大小的窗口逐块读取并写入响应，两端都不会持有整个文件。`HEAD` 返回同样的响应头但不带正文，客户端据此把拒绝变成一条提示，而不是浏览器保存下来的错误页。
+
+该路由注册在 connection 的精确路由表上、位于 `/api` 之下，因此处理函数之前先经过载体的 Host/Origin 校验与浏览器认证；它只在挂载了 `connection` 的 Web 运行时存在，其他部署下上文“使用本包”一节不变。`path` 接受与 Remote 读取相同的绝对路径或工作区相对路径；`sessionId` 走同一个 lookup：Host 没有对应 header 的 Session 返回 `404`。字节来自 `ctx.fs`、受该后端读取权限约束，与 `readAll` 完全一致，因此工作区根之外的文件只要可读就可下载。
+
+### 历史
+
+`history(path)` 在文件所在目录通过子进程 seam 运行 `git log --follow -n 50 --date=iso-strict --format=… --numstat -- <basename>` 并解析记录。每条记录带 `hash`、`shortHash`、`author`、ISO-8601 的 `date`、`subject`，以及 git 为该提交报告的 `additions` / `deletions`；二进制改动两项都报 `0`。文件可以在工作区内或工作区外。目录不在仓库内、文件从未提交、机器上没有 git 可执行文件这三种情况都返回 `{ path, entries: [] }` 而不失败；调用方取消仍会传播。
+
+### 分页
+
+`read` 返回一个行窗口，绝不返回整个文件。`range.offset` 是 1 起算的首行，缺省为 1；`range.limit` 是该页最多的行数，缺省为 `maxLines` 且不得超过它——更大的 limit，或不是正整数的 offset / limit，都是 `gateway/bad-request`。行以 `\n` 结束，末尾的 `\n` 是最后一行的终止符而不是再起一空行，所以两行文件就是两行。页的 `text` 以 `\n` 连接各行，最后一行之后不带终止符；`eof` 在该页含文件最后一行时为 true，offset 越过末尾则返回空页且 `eof` 为 true。每页还带上前置 stat 得到的文件 `version`，消费方据此分辨新页与旧页，以及 `bytes`——后端能报告时的整文件大小。服务只把文件读到该页之后的第一个字符为止，所以再大的文件每次请求也只占一页内存。
+
+### 字节窗口
+
+`read` 按行分页，绝不按字节；字节窗口走 `readBytes`。`range.offset` 是 0 起算的首字节，缺省为 0；`range.length` 是窗口最多的字节数，缺省为 `maxBytes` 且不得超过它——更长的窗口以 `too-large` 失败而不是被截短，不是整数或越界的 offset / length 则是 `gateway/bad-request`。窗口以 base64 的 `data` 返回，到文件末尾时短于 `length`，位于或越过末尾时为空；窗口含文件最后一个字节时 `eof` 为 true。不做任何解码，也不按二进制拒绝，因此图片或含 NUL 的文件在 `read` 以 `not-text` 失败之处仍可读出。与页一样附带同一 `version` 与 `bytes`。
+
+### 文件读取与目录检查
+
+读取和目录列举通过 `lstat` 拒绝不存在的路径、末端符号链接或错误的文件类型。文件操作随后通过组合文件系统解析和读取，不做额外的工作区包含检查，`list` 也列举它解析出的任意目录。只有 `rename`、`move` 与 `delete` 追加包含检查，针对解析后的父目录及任何目标目录。配置的分页、窗口、完整文件和目录列举上限仍然适用。文本页还拒绝无效 UTF-8 与 NUL 字节；字节读取不解码内容。空路径是 `gateway/bad-request`。
+
+### 变更流
+
+`changes` 是 `stream` 模式的 Remote。一代流注册观察队列并解析 Session 工作区根之后，才产出 `{ kind: 'ready' }`。随后产出 `{ kind: 'change', change }`，其中 `change` 对存在的文件为 `{ absolutePath, version }`，对被观察到已消失的文件为 `{ absolutePath, absent: true }`。来源是按该根内目标过滤的 `fs/observed`；操作系统并未被监视。一代流首次拉取后的观察都会排队，包括解析根期间的观察。流在取消或插件释放时结束。
+
+### 配置
+
+| 字段 | 默认值 | 含义 |
+|---|---|---|
+| `maxBytes` | `2097152`（2 MiB） | 单页文本与单个字节窗口的字节上限（含）；更大的页或窗口失败 |
+| `maxFileBytes` | `33554432`（32 MiB） | `readAll` 和 `readRelated` 的完整文件字节上限（含）；更大文件以 `too-large` 失败 |
+| `maxLines` | `5000` | 页大小的缺省值与上限（行）；更大的 `limit` 被拒绝 |
+| `maxEntries` | `2000` | 返回目录条目数上限；其余丢弃并报告截断 |
+
+生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-workspace-files)是每个可接受字段及其 JSDoc 的完备来源。
+
+### 失败
+
+每种失败都是一个带类型化 details 的 `RemoteError` 代码，声明于 [`src/types.ts`](src/types.ts)：`workspace-file/not-found`、`workspace-file/outside-workspace`（仅 `rename` 与 `delete`）、`workspace-file/too-large`（带 `limit`，即适用的页、窗口或完整文件上限）、`workspace-file/not-text`、`workspace-file/not-regular-file`（`kind` 为 `directory`、`symlink` 或 `other`）、`workspace-file/not-directory`（`kind` 为 `file`、`symlink` 或 `other`），以及只有修改操作会产生的三种拒绝：`workspace-file/stale`（文件在读入之后已改变）、`workspace-file/denied`（文件系统写入策略不接受该路径）与 `workspace-file/exists`（上传的文件名已被占用）。调用方按代码分支，绝不按消息文本。
+
+### Client 文件资源
+
+浏览器导出向 `ctx.resources` 注册 `file` 提供方，要求 `resources`、`remote` 和 `remote.workspaceFiles` 在场。bundle 中单个 `workspace-files` 条目供应两面；Client 没有单独配置。组件通过 `useResource<'file'>(address)` 读取 `WorkspaceFileStat { absolutePath, version, bytes? }` 元数据，内容另经 Remote 读取。任何 UI（包括 Global）访问同一完整地址都共享观察。
+
+`session/<sessionId>/<path>` 地址携带授权 Session，以及相对或绝对路径；前导斜杠保留，例如 `dsh-resource://file/session/s//etc/hosts`。Host 原样接收路径，负责解析与权限检查；Client 不需要 Session `cwd`。`absolute/<path>` 仍可解析，但没有授权 Session，以 `workspace-file/unknown-workspace` 失败，不借用当前或 Tab Session。不支持的地址以 `workspace-file/unsupported-address` 失败。语法由 [workspace-path](../../util/workspace-path/README.zh.md) 定义；Resource 泛型层只认地址和 `signal`。
+
+提供方等到 Host 的 `ready` 帧后才发首次 `stat`，读取期间将变更排队，随后将跟随者绑定到 `stat.absolutePath`。排队与实时变更都按该 Host 返回路径匹配。新的写入版本更新元数据并保留最近的字节大小；重复版本被忽略。消失通知会重新 stat 文件。stat 失败后仍跟随地址，后续写入可使其恢复；首次成功绑定路径前，Session 内任何写入都可触发重试。帧是 `RemoteResult` 值，编程异常不被捕获。
+
+每个 Session 的所有被跟随文件共用一条受监督的 `changes` 流。跟随者按反斜杠归一为斜杠的绝对路径匹配。载体掉线由 Gateway 监督器重连；Host 结束或终态失败的流会结束其跟随者，最后的元数据仍可读取，直到重新打开。最后一个跟随者离开时释放流，后继流等待该释放完成，插件拆除等待所有在途关闭。提供者声明 `ResourceProtocolMap.file`；文本预览声明其 Sidebar 行号导航参数。
+
+-----
+
+<a id="understand-the-implementation"></a>
+## 理解实现
+
+<details>
+<summary>实现内幕——点击展开</summary>
+
+### 设计概念
+
+经 `ctx.fs` 的读取使用后端的读取权限，而沙箱后端限制写入、字节写入与编辑、不限制读取；正是这一不对称使 `write` 与 `upload` 受策略约束，而所有读取不受。Typert lookup 从 live Session header 或持久层的 header-only `stat` 导出 `WorkspaceFileScope`，所以 cold subagent Session 不需要激活 Agent 或读取事件正文。本服务增加普通文件检查与有界传输；工作区包含要求只属于 `rename` 与 `delete`，两者因 `ctx.fs` seam 不提供改名与删除而直接调用 `node:fs`，变更观察则保留自己的根过滤。`history` 通过子进程 seam 运行 `git log`。页从 `streamText` 切出，后者逐块解码并拒绝非 UTF-8：切页器对窗口之前的行只计数不保留，对窗口内的每个片段先按字节上限验收再缓冲，并在窗口之后的第一个字符处返回。流之前的一次 `stat` 给出页所报告的版本与大小。
+
+### 源码地图
+
+| 文件 | 职责 |
+|---|---|
+| [`src/index.ts`](src/index.ts) | `WorkspaceFiles`：`workspaceFiles` 服务与 Remote 命名空间、`Config`、四道关、切页器、`parseGitLog`、`writeRefusal`、`uploadRefusal`、`resolveScope`、`read`、`readBytes`、`readAll`、`readRelated`、`stat`、`list`、`rename`、`move`、`delete`、`write`、`upload`、`history`，以及 `/api/workspace.download` 路由 |
+| [`src/download.ts`](src/download.ts) | 浏览器下载路由：它的路径与响应头、`Content-Disposition` 取值，以及由拉取驱动的字节流 |
+| [`src/changes.ts`](src/changes.ts) | `WorkspaceChangeFeed`：`fs/observed` 订阅与每个打开的 `changes` generation 各一条队列 |
+| [`src/types.ts`](src/types.ts) | 线路类型与 `RemoteErrorDetailsMap` 错误码，以 `./types` 发布给 Client 包 |
+| [`src/client/index.ts`](src/client/index.ts)、[`provider.ts`](src/client/provider.ts)、[`change-feed.ts`](src/client/change-feed.ts) | 浏览器插件、文件元数据与每 Session 变更流 |
+| [`src/client/types.ts`](src/client/types.ts)、[`remote.ts`](src/client/remote.ts) | 资源值、参数、Client 错误码与生成的 Remote 类型 |
+| — | 不发布运行时 invariant 伴生件；每个 Host 答案都在调用时由 `ctx.fs` 与沙箱策略推导。 |
+
+Typert 生成 `./typert` 与 `./remote` 暴露的 Host 与 Client Remote 产物。
+
+</details>
+
+-----
+
+<a id="further-exploration"></a>
+## 进一步探索
+
+- [文件系统能力](../../fs/fs/README.zh.md)——本服务经由读取的 `ctx.fs` 约定，含 `fs/observed` 与 `readByteRange`。
+- [沙箱策略](../../sandbox/sandbox-policy/README.zh.md)——Session 工作区根的来源。
+- [Remote 装配](../../api/remotes/README.zh.md)——Client 包如何触达 `workspaceFiles` 命名空间。
+- [Client 资源](../../client/resources/README.zh.md)——资源模型、`useResource`、pin 与提供者生命周期。
+- [工作区路径辅助](../../util/workspace-path/README.zh.md)——`fileAddressFor` 与 `parseFileAddress`，两端共享的 `dsh-resource://file/…` 地址语法。
+- [Sidebar 文本预览](../../client/ui-sidebar-documentpreview/README.zh.md)——经 `file` 提供者跟随文件并读取其页的 tab 类型。
+
+-----
+
+<a id="model-experience"></a>
+## 模型体验
+
+无，本包不注册任何工具、不贡献提示词章节、不追加任何会话事件。
+
+#### KV Cache 影响
+
+无；本包既不装配也不发送提供方请求。
+
+## 已知限制与延期工作
+
+<a id="known-limitations-and-deferred-work"></a>
+
+- **下载是每个文件一个请求**——浏览器路由每个 URL 只传一个文件，所以下载多选意味着每个文件一次请求、一次保存。若浏览器把连续的程序化下载当作弹窗，会请读者放行一次；对整批选择打一个包属于延期工作。
+- **下载路由仅限 Web**——它注册在 connection 载体上，因此没有该载体的运行时（非 Web profile、headless）拥有全部 Remote 读取，但没有浏览器下载。
+- **移动不是事务**——整个请求在第一个条目移动前完成校验，因此被拒绝时什么都不移动；但若某次重命名中途失败（并发写入、权限变化），在它之前的条目已经移动。无论成败，调用方都会重新列举源目录与目标目录。
+- **仅覆盖已埋点操作**——`changes` 转发 `fs/observed` 的发射；子进程、shell 命令或用户编辑器改动的文件不产生任何帧。
+- **变更观察仍限定在工作区内**——尽管读取、列目录与 `history` 可以使用文件系统后端够到的任意路径，`changes` 只过滤 Session 工作区根以内的观察。
+- **改动绕过文件系统 seam**——`rename` 与 `delete` 直接调用 `node:fs`，因为 `ctx.fs` 不提供重命名或删除操作，因此带沙箱或远端后端的写入规则不作用于它们；两个方法各自保留对 Session 工作区根的 `ctx.fs` 包含性检查。`write` 走的是另一条路，也是唯一受后端策略约束的修改操作，因而也是唯一会被 `read-only` 的 Session 拒绝的那个。
+- **`write` 既不新建也不移动**——目标必须已作为普通文件存在，且每次都带版本前置条件，因此无法创建文件，也无法覆盖调用方没有读过的文件。
+- **上传从不替换**——字节写入永远带 `createIfAbsent`，因此把文件放到已占用的位置会被拒绝，而不是以覆盖的方式“解决”；想让新字节落在那里，读者要先删除或重命名旧文件。
+- **`write` 只回元数据**——结果只带文件的新版本与字节数，不带写入前后的内容；需要差异基线的调用方要重新读取，而不是复用刚发出去的内容。
+- **历史靠外部 git**——`history` 在任何非零退出时都返回空历史，因此没有 `git` 的机器、仓库之外的目录，以及 git 从未提交过的文件彼此无法区分。
+- **没有总行数**——页只报告 `eof`，不报告后面还有多少行；需要总数的消费方要翻到末尾或按 `bytes` 估算。
+- **超长单行没有页**——超过 `maxBytes` 的单行在包含它的每个窗口都以 `too-large` 失败，因为页按行而非按字节切。
+- **读取不具备事务性**——结果元数据来自内容读取之前的 stat；并发写入可能使报告版本与返回内容不一致。
+- **generation 队列无界**——一个 `changes` generation 会缓冲每一条被包含的观察直到消费方 pull；停滞的消费方会在流的生命期内持续增长 Host 内存。
+- **`maxEntries` 限制的是答案，不是列举**——`list` 让 `ctx.fs.listDir` 列出全部子项后再截断数组，远超上限的目录仍让 Host 付出整个列举的代价（`fs-local` 上每个子项一次 stat）；要限制这份工作，需要文件系统 seam 的 `listDir` 支持上限。
+- **失效流保留元数据**——Host 结束 `changes` 或流终态失败后，已打开的值保持最后已知状态，直到重新打开。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者工作上下文——点击展开</summary>
+
+无。
+
+</details>

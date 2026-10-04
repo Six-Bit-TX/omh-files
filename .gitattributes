@@ -1,0 +1,3 @@
+# Preserve emitted and third-party artifact bytes, including template-literal whitespace.
+plugins/**/lib/** -whitespace
+plugins/**/vendor/** -whitespace

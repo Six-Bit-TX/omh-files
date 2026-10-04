@@ -1,0 +1,29 @@
+{
+  "name": "@local/dsh-client-ui-markdown",
+  "version": "0.1.0",
+  "private": true,
+  "description": "In-place Markdown editing in the dsh Web right Sidebar: a Muya tab type (browser half) over an authenticated asset route that mirrors the engine's own lib/ tree (host half).",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test:browser": "node tests/save.browser.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-workspace-files"
+      ]
+    }
+  },
+  "license": "MIT"
+}

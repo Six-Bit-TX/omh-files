@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!*.example
+*.tgz
+*.log
+test-results/
+playwright-report/
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
